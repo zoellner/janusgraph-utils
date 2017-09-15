@@ -15,38 +15,41 @@
  *******************************************************************************/
 package com.ibm.janusgraph.utils.importer.util;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
-public class WorkerPool implements AutoCloseable {
+public class WorkerPool implements AutoCloseable, WorkerListener {
     private static ExecutorService processor;
-    private List<Future<?>> futures = new ArrayList<Future<?>>();
-
+    private static final int sQueueCap = 10;
+    private LinkedBlockingQueue<Worker> queue = new LinkedBlockingQueue<Worker>(sQueueCap);
+    private AtomicInteger workerCounter = new AtomicInteger(0);
     private final long shutdownWaitMS = 10000;
-//    private int maxWorkers;
+    private Semaphore finished = new Semaphore(1);
     private int numThreads;
 
     public WorkerPool(int numThreads, int maxWorkers) {
         this.numThreads = numThreads;
-//        this.maxWorkers = maxWorkers;
         processor = Executors.newFixedThreadPool(numThreads);
+        finished.acquireUninterruptibly();
     }
 
-    public void submit(Runnable runnable) throws Exception {
-        Future<?> future = processor.submit(runnable);
-        futures.add(future);
-        while (futures.size() > numThreads) {
-            for (int i = 0; i < futures.size(); i++) {
-                Future<?> f = futures.get(i);
-                if (f.isDone()) {
-                    futures.remove(i);
-                }
+    public void submit(Worker worker) throws Exception {
+        worker.addListener(this);
+        synchronized(queue) {
+            if (workerCounter.get() <= numThreads) {
+                workerCounter.incrementAndGet();
+                processor.submit(worker);
+            } else {
+                // adding the worker into queue is better then
+                // using semaphore to block the feeding and wait
+                // for some worker to finish. This creates
+                // some sort of buffer effect.
+                queue.put(worker);
             }
-            Thread.sleep(1000);
         }
     }
 
@@ -60,8 +63,45 @@ public class WorkerPool implements AutoCloseable {
         }
     }
 
+    /**
+     * Pause the current thread and wait until all
+     * workers finish their jobs.
+     */
+    public void wait4Finish() {
+        finished.acquireUninterruptibly();
+    }
+
     @Override
     public void close() throws Exception {
         closeProcessor();
+    }
+
+    @Override
+    public void notify(Worker worker, WorkerListener.State state) {
+        switch (state) {
+        case Running:
+            break;
+        case Done:
+            synchronized(queue) {
+                int currentWorkerCount = workerCounter.decrementAndGet();
+                int queueSize = queue.size();
+                if (queueSize > 0) {
+                    //lets try to add worker into the processor
+                    if ( currentWorkerCount <= numThreads) {
+                        workerCounter.incrementAndGet();
+                        try {
+                            processor.submit(queue.take());
+                        } catch (InterruptedException e) {
+                            //ignore
+                        }
+                    }
+                } else if (currentWorkerCount == 0){
+                    finished.release();
+                }
+            }
+            break;
+        default:
+            break;
+        }
     }
 }
