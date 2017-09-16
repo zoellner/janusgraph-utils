@@ -25,7 +25,7 @@
       "propertyKeys": ["name"],
       "composite": true,
       "unique": true},
-    {"name": "vByNamePersion",
+    {"name": "vByNamePerson",
       "propertyKeys": ["name"],
       "composite": true,
       "unique": true,
